@@ -13,7 +13,11 @@
   逐项标记为歧义并删除连边，其余邮件照常建树。
 - 父 ID 不在本批次内时显示为**外部引用**（external reference），
   该邮件作为会话树根；没有任何父引用也没有子邮件的邮件列为**孤立邮件**。
-- 输出会话森林（树）、外部引用、孤立邮件与逐封关联依据。
+- 会话森林**不构嵌套树**：按“根序号升序、每棵树内沿父子关系深度优先”
+  **迭代**展开为扁平行（``rows``），行内给出根序号、父序号与深度，
+  页面按行缩进展示完整层级，API 返回同一行序——上千封依次回复的
+  长单链也不会触发 Python 构树或模板渲染的递归深度限制。
+- 输出扁平深度优先行、外部引用、孤立邮件与逐封关联依据。
 """
 
 from __future__ import annotations
@@ -96,7 +100,7 @@ def _empty_result(message_count: int, message_errors: list[dict]) -> dict:
         "duplicate_id_sets": [],
         "external_refs": [],
         "ambiguities": [],
-        "trees": [],
+        "rows": [],
         "orphans": [],
         "ambiguous_messages": [],
         "messages": [],
@@ -381,12 +385,18 @@ def thread_analysis(headers_list: list[str]) -> dict:
                 }
             )
 
-    # ---- 森林构建：展示桶（歧义邮件若仍被子邮件引用，仍作为树根展示）----
+    # ---- 森林展开：扁平深度优先行（迭代，不递归）----
+    # 展示桶规则（与之前一致）：
     # 1) 会话树：没有父连边但有子邮件的节点（含出边因成环被删、却仍收到
     #    正常回复的歧义节点），或父引用在批次外（外部引用）的根；
     # 2) 关联歧义：身份/父引用/成环存在歧义的邮件全部进歧义清单
     #    （有子树者同时出现在会话树中，并带歧义标记）；
     # 3) 孤立邮件：无父引用、无子邮件、无歧义的邮件。
+    # 上千封依次回复的长单链会超出 Python / 模板的递归深度限制，因此
+    # 会话森林不再构嵌套树，而是按“根序号升序、每棵树内深度优先”
+    # **迭代**展开为扁平行：行内给出根序号（root_index）、父序号
+    # （parent_index）与深度（depth，树根为 0），页面按行缩进展示，
+    # API 返回同一行序。
     roots: list[int] = []
     orphans: list[int] = []
     ambiguous_indexes: list[int] = []
@@ -404,10 +414,15 @@ def thread_analysis(headers_list: list[str]) -> dict:
     orphans.sort()
     ambiguous_indexes.sort()
 
-    def node_view(idx: int) -> dict:
+    def row_view(idx: int, root_index: int, depth: int) -> dict:
         msg = by_index[idx]
         return {
+            "root_index": root_index,
+            "external_parent_id": msg["parent_id"]
+            if depth == 0 and msg["relation"] == RELATION_EXTERNAL
+            else None,
             "index": idx,
+            "depth": depth,
             "message_id": msg["message_id"],
             "subject": msg["subject"],
             "from": msg["from"],
@@ -419,21 +434,17 @@ def thread_analysis(headers_list: list[str]) -> dict:
             "parent_id": msg["parent_id"],
             "parent_index": msg["parent_index"],
             "ambiguity_codes": list(msg["ambiguity_codes"]),
-            "children": [node_view(child) for child in msg["children"]],
         }
 
-    trees: list[dict] = []
+    rows: list[dict] = []
     for root_index in roots:
-        root = by_index[root_index]
-        trees.append(
-            {
-                "root_index": root_index,
-                "external_parent_id": root["parent_id"]
-                if root["relation"] == RELATION_EXTERNAL
-                else None,
-                "node": node_view(root_index),
-            }
-        )
+        # 迭代深度优先：子节点逆序入栈，弹出顺序即批次顺序（先序遍历）
+        stack: list[tuple[int, int]] = [(root_index, 0)]
+        while stack:
+            idx, depth = stack.pop()
+            rows.append(row_view(idx, root_index, depth))
+            for child in reversed(by_index[idx]["children"]):
+                stack.append((child, depth + 1))
 
     duplicate_id_sets = [
         {
@@ -451,14 +462,14 @@ def thread_analysis(headers_list: list[str]) -> dict:
         "message_errors": message_errors,
         "id_count": sum(1 for m in messages if m["message_id"]),
         "edge_count": len(edges),
-        "tree_count": len(trees),
+        "tree_count": len(roots),
         "orphan_count": len(orphans),
         "external_count": len(external_refs),
         "ambiguous_count": len(ambiguities),
         "duplicate_id_sets": duplicate_id_sets,
         "external_refs": external_refs,
         "ambiguities": ambiguities,
-        "trees": trees,
+        "rows": rows,
         "orphans": [_message_view(by_index[idx]) for idx in orphans],
         "ambiguous_messages": [
             _message_view(by_index[idx]) for idx in ambiguous_indexes
