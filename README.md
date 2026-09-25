@@ -28,7 +28,10 @@
   （跨封重复或单封出现多个 ID）、**In-Reply-To 含多个 ID**、以及
   **形成环（含自环）**的关联逐项标为歧义并删除连边，其余邮件照常建树；
   父 ID 不在批次内显示为**外部引用**，无父无子的邮件列为**孤立邮件**。
-  页面与 JSON 均展示会话树、外部引用、孤立邮件、歧义清单与**逐封关联依据**。
+  会话森林以**扁平深度优先行**输出（按根序号逐树、树内按父子关系迭代展开，
+  每行给出根序号、父序号与深度），不构造嵌套树、不做递归，上千封逐封
+  回复的超长单链也能正常分析。页面与 JSON 均按同一行序展示会话层级、
+  外部引用、孤立邮件、歧义清单与**逐封关联依据**。
 - **单封邮件脱敏分享**：分析页点击 **“下载脱敏报告”**（或调用
   `POST /api/analyze/share`，输入 `headers` 字符串），按投递顺序为不同
   主机名、IP 分别分配**本次请求内稳定**的 `H1`、`IP1` 等别名；同一值在
@@ -188,10 +191,12 @@ docker build -t mailtrace . && docker run --rm -p 8000:8000 mailtrace
    **“🧵 邮件会话关系（Message-ID 引用树）”** 文本框，沿用同一套分隔行
    （可点“填入 12 封示例”查看正常引用树、外部引用、孤立邮件、多 ID 歧义、
    重复 Message-ID 与引用环等各类样例），点击 **分析会话关系（多封）**：
-   页面以树形展示父子回复关系，单独卡片列出批次外父 ID（外部引用）、
-   未连边的歧义邮件与孤立邮件，并以表格给出**逐封**提取到的
-   `Message-ID` / `In-Reply-To` / `References`、父邮件序号、选取依据
-   （In-Reply-To 唯一 ID / References 末项）与关联状态。
+   页面按**深度优先行**逐行缩进展示完整父子层级（每行标注所属根序号、
+   父序号与深度；缩进超过 24 层后不再加深，以行内深度数值为准），
+   单独卡片列出批次外父 ID（外部引用）、未连边的歧义邮件与孤立邮件，
+   并以表格给出**逐封**提取到的 `Message-ID` / `In-Reply-To` /
+   `References`、父邮件序号、选取依据（In-Reply-To 唯一 ID /
+   References 末项）与关联状态。
 7. 需要检查 **ARC 链结构**时，把含 ARC 字段的原始头部粘贴到
    **“ARC 链结构检查”** 文本框（可点“填入示例”查看一条完整的两实例
    ARC 链），点击 **检查 ARC 链**：页面展示总状态、每个实例的三类字段
@@ -445,32 +450,31 @@ curl -s -X POST http://localhost:8000/api/thread-relations \
   "duplicate_id_sets": [],
   "external_refs": [],
   "ambiguities": [],
-  "trees": [
+  "rows": [
     {
-      "root_index": 1,
+      "root_index": 1, "index": 1, "parent_index": null, "depth": 0,
       "external_parent_id": null,
-      "node": {
-        "index": 1, "message_id": "a@example.com",
-        "subject": "root", "relation": "root", "relation_label": "会话根（无父引用）",
-        "basis": "none", "parent_id": null, "parent_index": null,
-        "ambiguity_codes": [],
-        "children": [
-          {
-            "index": 2, "message_id": "b@example.com",
-            "relation": "linked", "relation_label": "已连接父邮件",
-            "basis": "in_reply_to", "parent_id": "a@example.com",
-            "parent_index": 1, "ambiguity_codes": [],
-            "children": [
-              {
-                "index": 3, "message_id": "c@example.com",
-                "relation": "linked", "basis": "references",
-                "parent_id": "b@example.com", "parent_index": 2,
-                "ambiguity_codes": [], "children": []
-              }
-            ]
-          }
-        ]
-      }
+      "message_id": "a@example.com", "subject": "root",
+      "relation": "root", "relation_label": "会话根（无父引用）",
+      "basis": "none", "basis_label": "无父引用字段",
+      "parent_id": null, "ambiguity_codes": []
+    },
+    {
+      "root_index": 1, "index": 2, "parent_index": 1, "depth": 1,
+      "external_parent_id": null,
+      "message_id": "b@example.com",
+      "relation": "linked", "relation_label": "已连接父邮件",
+      "basis": "in_reply_to", "basis_label": "In-Reply-To 唯一 ID",
+      "parent_id": "a@example.com", "ambiguity_codes": []
+    },
+    {
+      "root_index": 1, "index": 3, "parent_index": 2, "depth": 2,
+      "external_parent_id": null,
+      "message_id": "c@example.com",
+      "relation": "linked", "relation_label": "已连接父邮件",
+      "basis": "references",
+      "basis_label": "References 末项（In-Reply-To 缺失 / 不可用）",
+      "parent_id": "b@example.com", "ambiguity_codes": []
     }
   ],
   "orphans": [],
@@ -516,12 +520,18 @@ curl -s -X POST http://localhost:8000/api/thread-relations \
   不影响其余邮件建树；歧义邮件若仍有正常子回复，会带歧义标记出现在树中。
 - 父 ID 在批次内找不到时 `relation: "external"`（外部引用），
   去重汇总到 `external_refs`（含引用方序号 `referenced_by`），
-  该邮件作为一棵树的根（`external_parent_id` 标出批次外父 ID）；
+  该邮件作为一棵树的根（其根行 `external_parent_id` 标出批次外父 ID）；
   没有任何父引用也没有子邮件、且无歧义的邮件进 `orphans`；
   未声明可用 `Message-ID` 的邮件 `relation: "no_id"`，不能被引用为父。
-- `trees[].node` 以嵌套 `children` 给出会话树；`messages` 是逐封的
-  关联依据（提取到的全部 ID、字段副本数、父序号、依据与可读原因），
-  页面与 JSON 字段一致。
+- `rows` 以**扁平深度优先行**给出会话森林：根按批次序号逐树展开，
+  树内先父后子（同层按批次序号），每行含 `root_index`（所属树根序号）、
+  `index`（本封序号）、`parent_index`（父序号，根为 `null`）与
+  `depth`（深度，根为 0）；`external_parent_id` 仅在外部引用根行非空。
+  行由显式栈**迭代**展开，不构造嵌套树也不递归，**不受 Python 递归
+  深度限制**——上千封逐封 `In-Reply-To` 串成的单链也能完整返回；
+  `tree_count` 仍为根（树）的数量。`messages` 是逐封的关联依据
+  （提取到的全部 ID、字段副本数、父序号、依据与可读原因），
+  页面与 JSON 字段一致、行序相同。
 - 输入限制与 `/api/batch-delays` 一致：必须是 JSON 对象且 `headers`
   为字符串数组、无空白项、至少一封（每封单独受 `MAX_INPUT_KB` 限制）；
   全部头部都无法解析为任何邮件字段时返回 400，个别无法解析的邮件记入
@@ -1084,7 +1094,7 @@ python -m unittest discover -s tests -v
 │       ├── parser.py       # 折行展开、时间解析、路径排序、耗时与异常
 │       ├── compare.py      # 双邮件头对照：保序全局对齐、耗时差值
 │       ├── batch.py        # 多封慢段归因：相邻节点对聚合、中位/最大耗时、排除计数
-│       ├── thread.py       # 邮件会话关系：尖括号消息 ID、In-Reply-To/References 选父、歧义与环处理、会话树
+│       ├── thread.py       # 邮件会话关系：尖括号消息 ID、In-Reply-To/References 选父、歧义与环处理、扁平深度优先会话行
 │       ├── share.py        # 单封脱敏分享：H1/IP1 别名化、白名单报告
 │       ├── arc.py          # ARC 链结构检查：i 标签归组、字段齐全性、连续编号、cv 校验
 │       ├── dkim.py         # DKIM h= 头字段覆盖审计：逐条签名、自底部向上匹配、重复字段不合并

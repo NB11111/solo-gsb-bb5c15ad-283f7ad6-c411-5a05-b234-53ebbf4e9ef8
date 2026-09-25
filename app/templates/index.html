@@ -321,20 +321,9 @@
 
   /* 邮件会话关系 */
   .btn-thread { background: #f472b6; color: #500724; }
-  ul.thread-tree, ul.thread-tree ul {
-    list-style: none; margin: 0; padding-left: 26px;
-    position: relative;
-  }
-  ul.thread-tree { padding-left: 0; }
-  ul.thread-tree ul::before {
-    content: ""; position: absolute; left: 9px; top: 0; bottom: 14px;
-    width: 2px; background: var(--line);
-  }
-  ul.thread-tree li { position: relative; margin: 8px 0; }
-  ul.thread-tree ul li::before {
-    content: ""; position: absolute; left: -17px; top: 20px;
-    width: 15px; height: 2px; background: var(--line);
-  }
+  .thread-rows { margin-top: 4px; }
+  .trow { margin: 8px 0; }
+  .tree-sep { border-top: 1px dashed var(--line); margin: 14px 0 6px; }
   .tnode {
     background: var(--panel); border: 1px solid var(--line);
     border-left: 3px solid var(--accent);
@@ -1305,39 +1294,6 @@
     {% if thread.error %}
       <div class="banner">{{ thread.error }}</div>
     {% else %}
-      {% macro thread_node(node) %}
-      <li>
-        <div class="tnode {% if node.relation == 'external' %}external{% elif node.parent_index is none %}root{% endif %}">
-          <div>
-            <span class="tbadge idx">#{{ node.index }}</span>
-            {% if node.ambiguity_codes %}
-              <span class="tbadge ambiguous">歧义</span>
-            {% elif node.relation == 'external' %}
-              <span class="tbadge external">外部引用根</span>
-            {% elif node.parent_index is none %}
-              <span class="tbadge root">会话根</span>
-            {% else %}
-              <span class="tbadge linked">已连接</span>
-            {% endif %}
-            <span class="t-subj">{{ node.subject or '（无 Subject）' }}</span>
-          </div>
-          <div class="t-meta">
-            {% if node.from %}{{ node.from }}{% else %}（无 From）{% endif %}
-            {% if node.date %} · {{ node.date }}{% endif %}
-          </div>
-          <div class="t-meta t-mid">
-            Message-ID: {% if node.message_id %}<code>{{ node.message_id }}</code>{% else %}<span class="time-bad">缺失 / 不唯一</span>{% endif %}
-            {% if node.parent_index is not none %} · 父：#{{ node.parent_index }} <span class="tbadge basis">{{ node.basis_label }}</span>{% endif %}
-          </div>
-        </div>
-        {% if node.children %}
-        <ul>
-          {% for child in node.children %}{{ thread_node(child) }}{% endfor %}
-        </ul>
-        {% endif %}
-      </li>
-      {% endmacro %}
-
       <h2 style="font-size:18px;">邮件会话关系结果</h2>
       {% set ns = namespace(batch=[], external=[], duplicate=[]) %}
       {% for m in thread.messages %}{% if m.message_id %}{% set _ = ns.batch.append(m.message_id) %}{% endif %}{% endfor %}
@@ -1378,16 +1334,47 @@
 
       <div class="card">
         <h2>🌳 会话树（{{ thread.tree_count }}）</h2>
-        {% if thread.trees %}
-          {% for tree in thread.trees %}
-            {% if tree.external_parent_id %}
-            <div class="ext-line">↳ 树根 #{{ tree.root_index }} 的父邮件不在本批次：
-              <code>{{ tree.external_parent_id }}</code>（外部引用）</div>
+        {% if thread.rows %}
+          <div class="thread-rows">
+          {% for row in thread.rows %}
+            {% if row.depth == 0 %}
+              {% if not loop.first %}<div class="tree-sep"></div>{% endif %}
+              {% if row.external_parent_id %}
+              <div class="ext-line">↳ 树根 #{{ row.index }} 的父邮件不在本批次：
+                <code>{{ row.external_parent_id }}</code>（外部引用）</div>
+              {% endif %}
             {% endif %}
-            <ul class="thread-tree">
-              {{ thread_node(tree.node) }}
-            </ul>
+            <div class="trow" style="margin-left: {{ ([row.depth, 24] | min) * 26 }}px;">
+              <div class="tnode {% if row.relation == 'external' %}external{% elif row.parent_index is none %}root{% endif %}">
+                <div>
+                  <span class="tbadge idx">#{{ row.index }}</span>
+                  {% if row.ambiguity_codes %}
+                    <span class="tbadge ambiguous">歧义</span>
+                  {% elif row.relation == 'external' %}
+                    <span class="tbadge external">外部引用根</span>
+                  {% elif row.parent_index is none %}
+                    <span class="tbadge root">会话根</span>
+                  {% else %}
+                    <span class="tbadge linked">已连接</span>
+                  {% endif %}
+                  <span class="t-subj">{{ row.subject or '（无 Subject）' }}</span>
+                </div>
+                <div class="t-meta">
+                  {% if row.from %}{{ row.from }}{% else %}（无 From）{% endif %}
+                  {% if row.date %} · {{ row.date }}{% endif %}
+                </div>
+                <div class="t-meta t-mid">
+                  Message-ID: {% if row.message_id %}<code>{{ row.message_id }}</code>{% else %}<span class="time-bad">缺失 / 不唯一</span>{% endif %}
+                  · 根 #{{ row.root_index }} · 深度 {{ row.depth }}{% if row.parent_index is not none %} · 父：#{{ row.parent_index }} <span class="tbadge basis">{{ row.basis_label }}</span>{% endif %}
+                </div>
+              </div>
+            </div>
           {% endfor %}
+          </div>
+          <p class="hint" style="margin:10px 0 0;">
+            按深度优先逐行展开（根 → 子，同行按批次序号），每行标注所属根序号、
+            父序号与深度；缩进超过 24 层后不再加深，以行内“深度”数值为准。
+          </p>
         {% else %}
           <p class="hint" style="margin:0;">没有可呈现的会话树（所有邮件均为孤立或歧义）。</p>
         {% endif %}

@@ -69,9 +69,14 @@ class ThreadStructureTests(unittest.TestCase):
         self.assertEqual(r["edge_count"], 1)
         self.assertEqual(r["tree_count"], 1)
         self.assertEqual(r["orphan_count"], 0)
-        tree = r["trees"][0]["node"]
-        self.assertEqual(tree["index"], 1)
-        self.assertEqual([c["index"] for c in tree["children"]], [2])
+        rows = r["rows"]
+        self.assertEqual([row["index"] for row in rows], [1, 2])
+        self.assertEqual(rows[0]["root_index"], 1)
+        self.assertEqual(rows[0]["depth"], 0)
+        self.assertIsNone(rows[0]["parent_index"])
+        self.assertEqual(rows[1]["root_index"], 1)
+        self.assertEqual(rows[1]["depth"], 1)
+        self.assertEqual(rows[1]["parent_index"], 1)
         msg2 = r["messages"][1]
         self.assertEqual(msg2["relation"], "linked")
         self.assertEqual(msg2["parent_index"], 1)
@@ -127,8 +132,10 @@ class ThreadStructureTests(unittest.TestCase):
         self.assertEqual(ext["message_id"], "outside@ext")
         self.assertEqual(ext["referenced_by"], [1, 2])
         self.assertEqual(r["tree_count"], 2)  # 两封都是外部引用根（均无子）
-        for tree in r["trees"]:
-            self.assertEqual(tree["external_parent_id"], "outside@ext")
+        root_rows = [row for row in r["rows"] if row["depth"] == 0]
+        self.assertEqual([row["index"] for row in root_rows], [1, 2])
+        for row in root_rows:
+            self.assertEqual(row["external_parent_id"], "outside@ext")
         for m in r["messages"]:
             self.assertEqual(m["relation"], "external")
             self.assertTrue(m["parent_external"])
@@ -265,9 +272,10 @@ class ThreadStructureTests(unittest.TestCase):
         ]
         r = thread_analysis(mails)
         self.assertEqual(r["edge_count"], 1)
-        tree = r["trees"][0]["node"]
-        self.assertEqual(tree["index"], 1)
-        self.assertEqual([c["index"] for c in tree["children"]], [2])
+        rows = r["rows"]
+        self.assertEqual([row["index"] for row in rows], [1, 2])
+        self.assertEqual([row["depth"] for row in rows], [0, 1])
+        self.assertEqual(rows[1]["parent_index"], 1)
 
     def test_case_insensitive_field_names_and_folding(self):
         # 字段名大小写不敏感；In-Reply-To 折行续行展开后仍能取出尖括号 ID
@@ -319,12 +327,17 @@ class SampleThreadTests(unittest.TestCase):
 
     def test_sample_main_tree_shape(self):
         r = thread_analysis(self.parts)
-        main_tree = next(t for t in r["trees"] if t["root_index"] == 1)
-        root = main_tree["node"]
-        self.assertIsNone(main_tree["external_parent_id"])
-        self.assertEqual([c["index"] for c in root["children"]], [2])
-        child2 = root["children"][0]
-        self.assertEqual(sorted(c["index"] for c in child2["children"]), [3, 4])
+        rows = [row for row in r["rows"] if row["root_index"] == 1]
+        # 深度优先行序：1（根）→ 2 → 3、4（2 的子，按批次序号）
+        self.assertEqual([row["index"] for row in rows], [1, 2, 3, 4])
+        self.assertIsNone(rows[0]["external_parent_id"])
+        depths = {row["index"]: row["depth"] for row in rows}
+        self.assertEqual(depths, {1: 0, 2: 1, 3: 2, 4: 2})
+        parents = {row["index"]: row["parent_index"] for row in rows}
+        self.assertIsNone(parents[1])
+        self.assertEqual(parents[2], 1)
+        self.assertEqual(parents[3], 2)
+        self.assertEqual(parents[4], 2)
         # #4 通过 References 末项连到 #2
         msg4 = next(m for m in r["messages"] if m["index"] == 4)
         self.assertEqual(msg4["basis"], "references")
@@ -346,6 +359,54 @@ class SampleThreadTests(unittest.TestCase):
         self.assertEqual(codes[12], ["cycle"])
 
 
+class LongChainTests(unittest.TestCase):
+    """超长单链（逐封 In-Reply-To 上一封）：扁平行迭代展开，不触发递归上限。"""
+
+    @staticmethod
+    def _chain(n):
+        mails = [_mail(1, mid="m1@x", subject="chain root")]
+        for i in range(2, n + 1):
+            mails.append(_mail(i, mid=f"m{i}@x", irt=f"<m{i - 1}@x>"))
+        return mails
+
+    def test_long_single_chain_expands_iteratively(self):
+        n = 1500  # 超过 Python 默认递归上限（1000）
+        r = thread_analysis(self._chain(n))
+        self.assertNotIn("error", r)
+        self.assertEqual(r["parsed_count"], n)
+        self.assertEqual(r["edge_count"], n - 1)
+        self.assertEqual(r["tree_count"], 1)
+        self.assertEqual(r["orphan_count"], 0)
+        rows = r["rows"]
+        self.assertEqual(len(rows), n)
+        # 单链的深度优先行序即输入序；行内根序号 / 父序号 / 深度完整
+        for pos, row in enumerate(rows, start=1):
+            self.assertEqual(row["index"], pos)
+            self.assertEqual(row["root_index"], 1)
+            self.assertEqual(row["depth"], pos - 1)
+            self.assertEqual(
+                row["parent_index"], None if pos == 1 else pos - 1
+            )
+        self.assertEqual(rows[0]["relation"], "root")
+        self.assertTrue(all(row["relation"] == "linked" for row in rows[1:]))
+
+    def test_long_chain_with_side_branches_keeps_dfs_order(self):
+        # 主链 1200 封，另在第 2 封下挂两个分支（批次内第 1201、1202 封），
+        # 验证行序仍为深度优先
+        mails = self._chain(1200)
+        mails.append(_mail(1201, mid="s1@x", irt="<m2@x>"))
+        mails.append(_mail(1202, mid="s2@x", irt="<m2@x>"))
+        r = thread_analysis(mails)
+        rows = r["rows"]
+        self.assertEqual(len(rows), 1202)
+        # 第 2 封之后先展开主链（子序号 3 < 1201 < 1202），分支排在主链之后
+        self.assertEqual(rows[1]["index"], 2)
+        self.assertEqual(rows[2]["index"], 3)
+        self.assertEqual([row["index"] for row in rows[-2:]], [1201, 1202])
+        self.assertTrue(all(row["depth"] == 2 for row in rows[-2:]))
+        self.assertTrue(all(row["parent_index"] == 2 for row in rows[-2:]))
+
+
 @unittest.skipIf(create_app is None, "未安装 Flask，跳过 API 测试")
 class ThreadApiTests(unittest.TestCase):
     def setUp(self):
@@ -358,8 +419,26 @@ class ThreadApiTests(unittest.TestCase):
         data = resp.get_json()
         self.assertEqual(data["parsed_count"], 12)
         self.assertEqual(data["tree_count"], 2)
+        self.assertIn("rows", data)
         self.assertIn("messages", data)
         self.assertIn("ambiguous_messages", data)
+        # 页面与 API 共用同一行序：主树 1→2→3→4，外部引用根 #5
+        self.assertEqual([row["index"] for row in data["rows"]], [1, 2, 3, 4, 5])
+
+    def test_api_thread_long_chain_no_recursion_error(self):
+        n = 1200
+        mails = ["Message-ID: <m1@x>\nSubject: chain root\n"]
+        mails += [
+            f"Message-ID: <m{i}@x>\nIn-Reply-To: <m{i - 1}@x>\n"
+            for i in range(2, n + 1)
+        ]
+        resp = self.client.post("/api/thread-relations", json={"headers": mails})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data["tree_count"], 1)
+        self.assertEqual(len(data["rows"]), n)
+        self.assertEqual(data["rows"][-1]["depth"], n - 1)
+        self.assertEqual(data["rows"][-1]["parent_index"], n - 1)
 
     def test_api_thread_accepts_single_header(self):
         resp = self.client.post(
@@ -418,6 +497,20 @@ class ThreadApiTests(unittest.TestCase):
         resp = self.client.post("/thread-relations", data={"headers_thread": "   "})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("未识别到任何邮件头部", resp.get_data(as_text=True))
+
+    def test_form_page_long_chain_renders_without_recursion(self):
+        n = 1200
+        mails = ["Message-ID: <m1@x>\nSubject: chain root"]
+        mails += [
+            f"Message-ID: <m{i}@x>\nIn-Reply-To: <m{i - 1}@x>"
+            for i in range(2, n + 1)
+        ]
+        raw = "\n===== 下一封邮件 =====\n".join(mails)
+        resp = self.client.post("/thread-relations", data={"headers_thread": raw})
+        self.assertEqual(resp.status_code, 200)
+        html = resp.get_data(as_text=True)
+        self.assertIn("邮件会话关系结果", html)
+        self.assertIn(f"深度 {n - 1}", html)  # 最深的一行也完整渲染
 
 
 if __name__ == "__main__":

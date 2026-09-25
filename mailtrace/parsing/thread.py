@@ -13,7 +13,11 @@
   逐项标记为歧义并删除连边，其余邮件照常建树。
 - 父 ID 不在本批次内时显示为**外部引用**（external reference），
   该邮件作为会话树根；没有任何父引用也没有子邮件的邮件列为**孤立邮件**。
-- 输出会话森林（树）、外部引用、孤立邮件与逐封关联依据。
+- 会话森林以**扁平深度优先行**（``rows``）输出：按根序号（输入序）逐树、
+  树内按父子关系用显式栈**迭代**展开，每行给出根序号、父序号与深度；
+  不构造嵌套树、不做任何递归，超长单链（上千封逐封回复）也不会触发
+  Python 递归限制。页面与 JSON 共用同一行序。
+- 输出会话行、外部引用、孤立邮件与逐封关联依据。
 """
 
 from __future__ import annotations
@@ -96,7 +100,7 @@ def _empty_result(message_count: int, message_errors: list[dict]) -> dict:
         "duplicate_id_sets": [],
         "external_refs": [],
         "ambiguities": [],
-        "trees": [],
+        "rows": [],
         "orphans": [],
         "ambiguous_messages": [],
         "messages": [],
@@ -381,7 +385,8 @@ def thread_analysis(headers_list: list[str]) -> dict:
                 }
             )
 
-    # ---- 森林构建：展示桶（歧义邮件若仍被子邮件引用，仍作为树根展示）----
+    # ---- 森林展开：扁平深度优先行（迭代，不递归）----
+    # 展示桶（歧义邮件若仍被子邮件引用，仍作为树根展示）：
     # 1) 会话树：没有父连边但有子邮件的节点（含出边因成环被删、却仍收到
     #    正常回复的歧义节点），或父引用在批次外（外部引用）的根；
     # 2) 关联歧义：身份/父引用/成环存在歧义的邮件全部进歧义清单
@@ -404,36 +409,42 @@ def thread_analysis(headers_list: list[str]) -> dict:
     orphans.sort()
     ambiguous_indexes.sort()
 
-    def node_view(idx: int) -> dict:
-        msg = by_index[idx]
-        return {
-            "index": idx,
-            "message_id": msg["message_id"],
-            "subject": msg["subject"],
-            "from": msg["from"],
-            "date": msg["date"],
-            "relation": msg["relation"],
-            "relation_label": RELATION_LABELS[msg["relation"]],
-            "basis": msg["basis"],
-            "basis_label": BASIS_LABELS[msg["basis"]],
-            "parent_id": msg["parent_id"],
-            "parent_index": msg["parent_index"],
-            "ambiguity_codes": list(msg["ambiguity_codes"]),
-            "children": [node_view(child) for child in msg["children"]],
-        }
-
-    trees: list[dict] = []
+    # 逐树用显式栈做深度优先展开：根按输入序，子节点逆序入栈使
+    # 出栈顺序保持批次序号升序。每行记录根序号、父序号与深度，
+    # 任意长的单链都不会触及 Python 递归上限。
+    rows: list[dict] = []
     for root_index in roots:
         root = by_index[root_index]
-        trees.append(
-            {
-                "root_index": root_index,
-                "external_parent_id": root["parent_id"]
-                if root["relation"] == RELATION_EXTERNAL
-                else None,
-                "node": node_view(root_index),
-            }
+        external_parent_id = (
+            root["parent_id"] if root["relation"] == RELATION_EXTERNAL else None
         )
+        stack: list[tuple[int, int]] = [(root_index, 0)]
+        while stack:
+            idx, depth = stack.pop()
+            msg = by_index[idx]
+            rows.append(
+                {
+                    "root_index": root_index,
+                    "index": idx,
+                    "parent_index": msg["parent_index"],
+                    "depth": depth,
+                    "external_parent_id": external_parent_id
+                    if idx == root_index
+                    else None,
+                    "message_id": msg["message_id"],
+                    "subject": msg["subject"],
+                    "from": msg["from"],
+                    "date": msg["date"],
+                    "relation": msg["relation"],
+                    "relation_label": RELATION_LABELS[msg["relation"]],
+                    "basis": msg["basis"],
+                    "basis_label": BASIS_LABELS[msg["basis"]],
+                    "parent_id": msg["parent_id"],
+                    "ambiguity_codes": list(msg["ambiguity_codes"]),
+                }
+            )
+            for child in reversed(msg["children"]):
+                stack.append((child, depth + 1))
 
     duplicate_id_sets = [
         {
@@ -451,14 +462,14 @@ def thread_analysis(headers_list: list[str]) -> dict:
         "message_errors": message_errors,
         "id_count": sum(1 for m in messages if m["message_id"]),
         "edge_count": len(edges),
-        "tree_count": len(trees),
+        "tree_count": len(roots),
         "orphan_count": len(orphans),
         "external_count": len(external_refs),
         "ambiguous_count": len(ambiguities),
         "duplicate_id_sets": duplicate_id_sets,
         "external_refs": external_refs,
         "ambiguities": ambiguities,
-        "trees": trees,
+        "rows": rows,
         "orphans": [_message_view(by_index[idx]) for idx in orphans],
         "ambiguous_messages": [
             _message_view(by_index[idx]) for idx in ambiguous_indexes

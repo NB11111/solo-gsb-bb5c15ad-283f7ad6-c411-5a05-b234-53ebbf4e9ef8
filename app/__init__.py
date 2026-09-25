@@ -266,7 +266,7 @@ def create_app() -> Flask:
                 "duplicate_id_sets": [],
                 "external_refs": [],
                 "ambiguities": [],
-                "trees": [],
+                "rows": [],
                 "orphans": [],
                 "ambiguous_messages": [],
                 "messages": [],
